@@ -1,8 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createCase } from "../services/salesforce.js";
 import { CreateCaseSchema } from "../schemas/index.js";
-import { McpToolResponse, CaseRecord } from "../types.js";
+import { getAuthContext } from "../auth-context.js";
 import { getActiveEnvironment } from "../config.js";
+import { McpToolResponse, CaseRecord } from "../types.js";
 
 export function registerCaseTools(server: McpServer): void {
   server.registerTool(
@@ -10,40 +11,24 @@ export function registerCaseTools(server: McpServer): void {
     {
       title: "Create Salesforce Case",
       description: `Create a new Case record in Salesforce.
-⚠️  This is the ONLY write operation permitted by this MCP server. All other operations are read-only.
+⚠️ This is the ONLY write operation in this MCP server. All other tools are read-only.
 The Case is created under the authenticated user's identity, respecting their org permissions.
 
 Args:
-  - access_token (required): Salesforce OAuth access token of the user creating the case
-  - instance_url (required): Salesforce instance URL
-  - subject (required): Case subject / title (max 255 chars)
-  - description (optional): Detailed description of the issue (max 32,000 chars)
-  - status (optional, default "New"): "New" | "Working" | "Escalated" | "Closed"
-  - priority (optional, default "Medium"): "High" | "Medium" | "Low"
+  - subject (required): Case title, max 255 chars
+  - description (optional): Detailed text, max 32k chars
+  - status (default "New"): "New" | "Working" | "Escalated" | "Closed"
+  - priority (default "Medium"): "High" | "Medium" | "Low"
   - origin (optional): "Phone" | "Email" | "Web"
-  - account_id (optional): 18-char Account record ID to link the case to
-  - contact_id (optional): 18-char Contact record ID to link the case to
-  - type (optional): Case Type picklist value (org-specific)
-  - reason (optional): Case Reason picklist value (org-specific)
-  - custom_fields (optional): Object with additional custom field API names and values
+  - account_id / contact_id (optional): Link to a related record
+  - type / reason (optional): Org-specific picklist values
+  - custom_fields (optional): Map of API name → value for any custom fields
 
-Returns:
-{
-  "id": string,          // New Case record ID (18-char)
-  "success": boolean,
-  "case_number": string, // Auto-generated CaseNumber
-  "environment": string  // Which environment was used
-}
+Returns: New Case ID, CaseNumber, and a deep link to view it in Salesforce.
 
 Examples:
-  - "Create a high-priority web case for billing issue" →
-      subject: "Billing Issue", priority: "High", origin: "Web"
-  - "Log a case for account 001xx..." →
-      subject: "Support Request", account_id: "001xx..."
-
-Errors:
-  - REQUIRED_FIELD_MISSING: subject is required
-  - INVALID_ID: account_id or contact_id is not a valid record ID`,
+  - "Log a high-priority web case for a billing problem"
+  - "Create a support case linked to account 001xx..."`,
       inputSchema: CreateCaseSchema,
       annotations: {
         readOnlyHint: false,
@@ -53,8 +38,6 @@ Errors:
       },
     },
     async ({
-      access_token,
-      instance_url,
       subject,
       description,
       status,
@@ -66,9 +49,7 @@ Errors:
       reason,
       custom_fields,
     }): Promise<McpToolResponse> => {
-      const auth = { accessToken: access_token, instanceUrl: instance_url };
-
-      // Build the Case payload
+      const auth = getAuthContext();
       const caseData: CaseRecord = {
         Subject: subject,
         ...(description ? { Description: description } : {}),
@@ -79,33 +60,18 @@ Errors:
         ...(contact_id ? { ContactId: contact_id } : {}),
         ...(type ? { Type: type } : {}),
         ...(reason ? { Reason: reason } : {}),
-        ...(custom_fields ? custom_fields : {}),
+        ...(custom_fields || {}),
       };
-
       const result = await createCase(auth, caseData);
       const environment = getActiveEnvironment();
-
       if (!result.success) {
         return {
           content: [
-            {
-              type: "text",
-              text: `❌ Failed to create Case: ${result.errors.join("; ")}`,
-            },
+            { type: "text", text: `❌ Failed to create Case: ${result.errors.join("; ")}` },
           ],
           structuredContent: { success: false, errors: result.errors },
         };
       }
-
-      const output = {
-        id: result.id,
-        success: true,
-        subject,
-        environment,
-        instance_url,
-        view_url: `${instance_url}/${result.id}`,
-      };
-
       return {
         content: [
           {
@@ -115,11 +81,17 @@ Errors:
               `**ID:** \`${result.id}\``,
               `**Subject:** ${subject}`,
               `**Priority:** ${priority ?? "Medium"} | **Status:** ${status ?? "New"}`,
-              `**View in Salesforce:** ${instance_url}/${result.id}`,
+              `**View in Salesforce:** ${auth.instanceUrl}/${result.id}`,
             ].join("\n"),
           },
         ],
-        structuredContent: output,
+        structuredContent: {
+          id: result.id,
+          success: true,
+          subject,
+          environment,
+          view_url: `${auth.instanceUrl}/${result.id}`,
+        },
       };
     }
   );
