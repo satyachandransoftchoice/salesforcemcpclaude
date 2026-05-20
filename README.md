@@ -1,223 +1,185 @@
-# Salesforce MCP Server
+# Salesforce MCP Server for Claude
 
-A **Model Context Protocol (MCP) server** for Salesforce, built for native integration with Claude.
+A production-ready **Model Context Protocol (MCP) server** that lets Claude.ai users in your org get insights from Salesforce using their own credentials.
 
-## Capabilities
-
-| Capability | Scope |
-|---|---|
-| **Read** | All Salesforce objects the authenticated user can access |
-| **Write** | Case creation only |
-| **Permissions** | Respects the logged-in user's field-level security, sharing rules, and profile permissions |
-| **Environments** | Sandbox (`test.salesforce.com`) + Production — togglable at runtime |
+- **Full OAuth** — users click "Connect Salesforce" in Claude.ai, sign in with their Salesforce account, done
+- **Per-user permissions** — every query runs under the user's profile, FLS, and sharing rules
+- **Read-only by default** — only `sf_create_case` writes; everything else is read
+- **Sandbox/Production toggle** — switch environments at runtime
 
 ---
 
-## Tools
+## Architecture
 
-| Tool | Type | Description |
+```
+┌─────────────────┐         ┌────────────────────────┐         ┌──────────────┐
+│  Claude.ai User │         │  Salesforce MCP Server │         │  Salesforce  │
+│                 │         │   (Railway/Azure/etc)  │         │              │
+└────────┬────────┘         └───────────┬────────────┘         └──────┬───────┘
+         │                              │                              │
+         │ 1. Click "Connect"           │                              │
+         ├─────────────────────────────▶│                              │
+         │                              │  2. Redirect to SF login     │
+         │◀─────────────────────────────┼─────────────────────────────▶│
+         │                              │                              │
+         │  3. User logs in to SF       │                              │
+         ├──────────────────────────────┼─────────────────────────────▶│
+         │                              │  4. Callback w/ code         │
+         │                              │◀─────────────────────────────┤
+         │  5. Token issued             │                              │
+         │◀─────────────────────────────┤                              │
+         │                              │                              │
+         │  6. MCP calls w/ Bearer      │                              │
+         ├─────────────────────────────▶│  7. API calls w/ user token  │
+         │                              ├─────────────────────────────▶│
+         │  8. Results (user-scoped)    │                              │
+         │◀─────────────────────────────┤◀─────────────────────────────┤
+```
+
+---
+
+## Tools (9)
+
+| Tool | Type | Purpose |
 |---|---|---|
-| `sf_get_environment` | Read | Show the active environment and URLs |
-| `sf_toggle_environment` | Config | Switch between sandbox and production |
-| `sf_whoami` | Read | Get identity info of the authenticated user |
-| `sf_list_objects` | Read | List all accessible Salesforce SObjects |
-| `sf_describe_object` | Read | Get full schema/field definitions for any object |
-| `sf_query` | Read | Execute SOQL SELECT queries |
-| `sf_search` | Read | SOSL full-text search across objects |
-| `sf_get_record` | Read | Retrieve a single record by ID |
-| `sf_create_case` | **Write** | Create a new Case record (only write operation) |
+| `sf_get_environment` | Read | Show active environment |
+| `sf_toggle_environment` | Config | Sandbox ↔ Production |
+| `sf_whoami` | Read | Verify connected user |
+| `sf_list_objects` | Read | List accessible SObjects |
+| `sf_describe_object` | Read | Get schema for any object |
+| `sf_query` | Read | Execute SOQL (DML blocked) |
+| `sf_search` | Read | SOSL full-text search |
+| `sf_get_record` | Read | Fetch one record by ID |
+| `sf_create_case` | **Write** | Create a Case |
 
 ---
 
-## Prerequisites
+## Step-by-Step Setup
 
-- Node.js ≥ 18
-- A Salesforce **Connected App** with OAuth 2.0 enabled
-  - Required OAuth scopes: `api`, `refresh_token`, `offline_access`
+### 1. Create Salesforce Connected Apps (one per environment)
 
-### Create a Connected App in Salesforce
+In **Salesforce Setup → App Manager → New Connected App**:
 
-1. Setup → App Manager → New Connected App
-2. Enable OAuth Settings
-3. Add scopes: `Access and manage your data (api)`, `Perform requests on your behalf at any time (refresh_token, offline_access)`
-4. Set Callback URL: `https://login.salesforce.com/services/oauth2/success`
-5. Save and note the **Consumer Key** and **Consumer Secret**
+| Field | Value |
+|---|---|
+| Connected App Name | `Claude MCP Sandbox` (or Production) |
+| API Name | `Claude_MCP` |
+| Contact Email | your email |
+| Enable OAuth Settings | ✅ |
+| Callback URL | `https://YOUR-DEPLOYMENT-URL/oauth/callback` |
+| Selected OAuth Scopes | `Access and manage your data (api)`, `Perform requests at any time (refresh_token, offline_access)` |
+| Require Secret for Web Server Flow | ✅ |
+
+After saving:
+- Wait 5-10 min for propagation
+- Copy the **Consumer Key** (client_id) and **Consumer Secret** (client_secret)
+
+Repeat for both sandbox (`test.salesforce.com`) and production (`login.salesforce.com`).
+
+### 2. Deploy to Railway
+
+1. Sign up at [railway.app](https://railway.app) (GitHub login works)
+2. **New Project → Deploy from GitHub repo → satyachandransoftchoice/salesforcemcpclaude**
+3. Railway auto-detects Node.js and starts building
+4. Once deployed, click **Settings → Networking → Generate Domain** to get your public URL
+5. In **Variables**, add:
+   ```
+   PUBLIC_BASE_URL=https://your-app.up.railway.app
+   SF_ENVIRONMENT=sandbox
+   SF_SANDBOX_URL=https://test.salesforce.com
+   SF_SANDBOX_CLIENT_ID=<from your sandbox Connected App>
+   SF_SANDBOX_CLIENT_SECRET=<from your sandbox Connected App>
+   SF_PROD_URL=https://login.salesforce.com
+   SF_PROD_CLIENT_ID=<from your prod Connected App>
+   SF_PROD_CLIENT_SECRET=<from your prod Connected App>
+   ```
+6. **Go back to your Salesforce Connected App** and update the Callback URL to:
+   `https://your-app.up.railway.app/oauth/callback`
+
+### 3. Register in Claude.ai
+
+1. Open Claude.ai → **Settings → Integrations → Add custom integration**
+2. **Integration name:** `Salesforce`
+3. **MCP server URL:** `https://your-app.up.railway.app/mcp`
+4. Save
+5. Click **Connect** next to the Salesforce integration
+6. You'll be redirected to Salesforce → log in → approve → back to Claude
+7. You're connected! Try asking Claude:
+   - *"What's my Salesforce username?"*
+   - *"Show me my open opportunities"*
+   - *"How many cases were created this week?"*
 
 ---
 
-## Installation & Setup
+## Switching Environments
+
+In Claude:
+
+> *"Switch to production"* → Claude calls `sf_toggle_environment`
+>
+> *"Reconnect Salesforce"* → Re-runs OAuth against the new environment
+
+The toggle changes which Connected App OAuth flow uses on the next sign-in. Already-issued tokens for the old environment continue to work until they expire.
+
+---
+
+## Security
+
+- **No service account** — the server never has admin access. It only acts as whichever user is signed in.
+- **Tokens scoped per request** — each MCP call runs in its own AsyncLocalStorage context.
+- **Tokens never logged** — only opaque session IDs appear in logs.
+- **In-memory token store** — for single-instance deployments. For multi-instance, swap `oauth.ts` storage maps for Redis.
+- **Read-only by default** — only `sf_create_case` can write. SOQL DML statements are blocked at the schema level.
+
+---
+
+## Local Development
 
 ```bash
-git clone <your-repo-url>
-cd salesforce-mcp-server
+git clone https://github.com/satyachandransoftchoice/salesforcemcpclaude.git
+cd salesforcemcpclaude
 npm install
 cp .env.example .env
-# Edit .env with your credentials
-npm run build
+# Edit .env with your Connected App credentials and a public URL (use ngrok for local OAuth)
+
+npm run dev    # tsx watch mode
+# or
+npm run build && npm start
 ```
+
+For local OAuth testing, use **ngrok**: `ngrok http 3000` → set `PUBLIC_BASE_URL` to the ngrok URL and update your SF Connected App callback to match.
 
 ---
 
-## Configuration (`.env`)
+## Stdio Mode (Claude Desktop only)
 
-```env
-# Active environment at startup: "sandbox" or "production"
-SF_ENVIRONMENT=sandbox
-
-# Transport: "stdio" (Claude Desktop/Code) or "http" (remote deployment)
-TRANSPORT=stdio
-PORT=3000
-
-# Sandbox
-SF_SANDBOX_URL=https://test.salesforce.com
-SF_SANDBOX_CLIENT_ID=your_sandbox_client_id
-SF_SANDBOX_CLIENT_SECRET=your_sandbox_client_secret
-
-# Production
-SF_PROD_URL=https://login.salesforce.com
-SF_PROD_CLIENT_ID=your_prod_client_id
-SF_PROD_CLIENT_SECRET=your_prod_client_secret
-```
-
----
-
-## Running Locally
-
-```bash
-# stdio (for Claude Desktop / Claude Code)
-npm start
-
-# HTTP (for remote deployment)
-TRANSPORT=http npm start
-```
-
----
-
-## Claude Desktop Integration (stdio)
-
-Add to your `claude_desktop_config.json`:
+For local single-user usage without OAuth, set up Claude Desktop with a pre-fetched token:
 
 ```json
 {
   "mcpServers": {
     "salesforce": {
       "command": "node",
-      "args": ["/absolute/path/to/salesforce-mcp-server/dist/index.js"],
+      "args": ["/path/to/salesforcemcpclaude/dist/index.js"],
       "env": {
+        "TRANSPORT": "stdio",
         "SF_ENVIRONMENT": "sandbox",
-        "SF_SANDBOX_URL": "https://test.salesforce.com",
-        "SF_SANDBOX_CLIENT_ID": "your_client_id",
-        "SF_SANDBOX_CLIENT_SECRET": "your_client_secret",
-        "SF_PROD_URL": "https://login.salesforce.com",
-        "SF_PROD_CLIENT_ID": "your_prod_client_id",
-        "SF_PROD_CLIENT_SECRET": "your_prod_client_secret"
+        "SF_ACCESS_TOKEN": "00D...",
+        "SF_INSTANCE_URL": "https://yourorg.my.salesforce.com"
       }
     }
   }
 }
 ```
 
-**Config file locations:**
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
----
-
-## Claude.ai Remote (HTTP / MCP URL)
-
-When deployed as an HTTP server, register the MCP URL in Claude.ai under **Settings → Integrations → Add MCP Server**:
-
-```
-https://your-deployment-url/mcp
-```
-
----
-
-## Org Deployment Options
-
-### Option A: Deploy to any Node.js host (Heroku, Railway, Render, Azure App Service)
-
+Get a token via Salesforce CLI:
 ```bash
-# Set environment variables on your host platform, then:
-TRANSPORT=http npm start
-```
-
-### Option B: Docker
-
-```dockerfile
-FROM node:20-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY dist ./dist
-ENV TRANSPORT=http
-ENV PORT=3000
-EXPOSE 3000
-CMD ["node", "dist/index.js"]
-```
-
-Build and run:
-```bash
-npm run build
-docker build -t salesforce-mcp-server .
-docker run -p 3000:3000 \
-  -e SF_ENVIRONMENT=production \
-  -e SF_PROD_CLIENT_ID=... \
-  -e SF_PROD_CLIENT_SECRET=... \
-  salesforce-mcp-server
-```
-
-### Option C: Azure Functions / AWS Lambda (serverless)
-Point the function handler at `dist/index.js` and set `TRANSPORT=http`. Each invocation is stateless.
-
----
-
-## Authentication Flow
-
-This server uses **per-request user authentication**. Each tool call requires:
-
-- `access_token` — the caller's Salesforce OAuth access token
-- `instance_url` — the caller's Salesforce instance URL (e.g. `https://yourorg.my.salesforce.com`)
-
-The server **never stores tokens**. Every API call to Salesforce uses the token supplied in that specific tool call, ensuring user-level permission scoping.
-
-### Getting a token (for testing)
-
-```bash
-# Device flow / Web flow – use Salesforce CLI:
 sf org login web --instance-url https://test.salesforce.com
 sf org display --verbose
-# Copy the "Access Token" value
 ```
 
 ---
 
-## Security Notes
+## Repository
 
-- **Read-only by design**: The only write operation is `sf_create_case`
-- **User-scoped permissions**: All queries run under the user's profile/permission sets
-- **No token storage**: Tokens are passed per-request and never persisted
-- **No admin-level access**: The server has no service account; it only acts as the authenticated user
-- Keep `.env` out of version control (it's in `.gitignore`)
-
----
-
-## Switching Environments
-
-At runtime, tell Claude:
-
-> *"Switch to production environment"* → Claude calls `sf_toggle_environment` with `environment: "production"`
-
-> *"Which environment are we on?"* → Claude calls `sf_get_environment`
-
-The toggle persists for the lifetime of the server process. On restart, it defaults back to `SF_ENVIRONMENT` in your `.env`.
-
----
-
-## Development
-
-```bash
-npm run dev    # ts-node (no build step)
-npm run build  # compile TypeScript → dist/
-npm start      # run compiled server
-```
+https://github.com/satyachandransoftchoice/salesforcemcpclaude
